@@ -22,19 +22,21 @@ BASE_PORT = 8100
 JOB_TIMEOUT_S = 420
 
 
-def job_dir(set_name, scenario, method, rep):
-    return RUNS / set_name / f"{scenario}__{method}__r{rep}"
+SCENARIO_FILES = {"dev": "scenarios.json", "heldout": "scenarios.json", "heldout_v2": "scenarios_v2.json"}
 
 
-def collect():
-    """Gather every finished result.json into one CSV."""
-    rows = [json.loads(p.read_text()) for p in sorted(RUNS.glob("*/*/result.json"))
-            if not p.parent.parent.name.startswith("_")]   # _smoke etc. are not results
+def job_dir(tag, set_name, scenario, method, rep):
+    return RUNS / tag / set_name / f"{scenario}__{method}__r{rep}"
+
+
+def collect(tag):
+    """Gather every finished result.json of one tag into eval/results/<tag>/results.csv."""
+    rows = [json.loads(p.read_text()) for p in sorted((RUNS / tag).glob("*/*/result.json"))]
     rows = [r for r in rows if not r.get("error")]
     if rows:
-        RESULTS.mkdir(parents=True, exist_ok=True)
-        cols = list(rows[0].keys())
-        with open(RESULTS / "results.csv", "w", newline="", encoding="utf-8") as f:
+        (RESULTS / tag).mkdir(parents=True, exist_ok=True)
+        cols = list(dict.fromkeys(k for r in rows for k in r))
+        with open(RESULTS / tag / "results.csv", "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=cols)
             w.writeheader()
             w.writerows(rows)
@@ -43,7 +45,8 @@ def collect():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--set", choices=["dev", "heldout"], required=True)
+    ap.add_argument("--set", choices=list(SCENARIO_FILES), required=True)
+    ap.add_argument("--tag", default="v2", help="results are kept under eval/runs/<tag> and eval/results/<tag>")
     ap.add_argument("--methods", nargs="+", default=["agent"])
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--workers", type=int, default=3)
@@ -51,7 +54,7 @@ def main():
     ap.add_argument("--force", action="store_true")
     a = ap.parse_args()
 
-    scenarios = json.loads((ROOT / "eval" / "scenarios.json").read_text())[a.set]
+    scenarios = json.loads((ROOT / "eval" / SCENARIO_FILES[a.set]).read_text())[a.set]
     jobs = [(s["id"], m, r) for s in scenarios if not a.only or s["id"] in a.only
             for m in a.methods for r in range(1, a.reps + 1)]
     ports = queue.Queue()
@@ -60,7 +63,7 @@ def main():
 
     def run(job):
         scenario, method, rep = job
-        d = job_dir(a.set, scenario, method, rep)
+        d = job_dir(a.tag, a.set, scenario, method, rep)
         res = d / "result.json"
         if res.exists() and not a.force and not json.loads(res.read_text()).get("error"):
             return f"skip  {d.name}"
@@ -83,8 +86,8 @@ def main():
     with ThreadPoolExecutor(a.workers) as ex:
         for line in ex.map(run, jobs):
             print(line, flush=True)
-    rows = collect()
-    print(f"collected {len(rows)} results -> eval/results/results.csv; total cost ${sum(r['cost_usd'] for r in rows):.3f}")
+    rows = collect(a.tag)
+    print(f"collected {len(rows)} results -> eval/results/{a.tag}/results.csv; total cost ${sum(r['cost_usd'] for r in rows):.3f}")
 
 
 if __name__ == "__main__":

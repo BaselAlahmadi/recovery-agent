@@ -1,20 +1,25 @@
 """Saving orders, and replaying orders that were lost."""
 import json
 import queue
+import random
 import threading
 import time
 
-from shop import db, metrics, payment, worker
+from shop import config, db, metrics, payment, worker
 from shop.config import LOG_DIR
 from shop.logger import log
 
-REPLAY_ATTEMPTS = 5          # the provider is flaky, so a replayed charge may need a few tries
+REPLAY_ATTEMPTS = 8          # per order: the provider and the database may both fail a few times
+REPLAY_BUDGET_S = 40         # stay under the caller's 60 s timeout; call again for the rest (safe to repeat)
 _replay_lock = threading.Lock()
 
 
 def save_order(o, replayed=False):
     """Insert the order, take stock, queue it for fulfillment.
     Returns False (and does nothing) if this order_id is already saved, so it never duplicates."""
+    # FAULT F6: the write is silently lost. No error, no log line, the caller carries on as if it worked.
+    if random.random() < config.get("f6_save_fail_rate"):
+        return False
     with db.connect(db.SOURCE_DB) as c:
         cur = c.execute("INSERT OR IGNORE INTO orders VALUES (?, ?, ?, ?, ?)",
                         (o["order_id"], o["sku"], o["qty"], o["amount"], time.time()))
@@ -92,11 +97,19 @@ def requeue_unprocessed():
         _requeue_lock.release()
 
 
+def _is_saved(order_id):
+    with db.connect(db.SOURCE_DB) as c:
+        return c.execute("SELECT 1 FROM orders WHERE order_id = ?", (order_id,)).fetchone() is not None
+
+
 def replay_lost_orders():
     """Re-create orders the customer was told succeeded ("ok") but that were never saved.
     - Orders answered "payment_failed" are NOT replayed: the customer was told it failed.
     - Requests with no response yet (still in flight) are skipped.
-    - Already-saved orders are skipped, so running this twice never duplicates anything."""
+    - Already-saved orders are skipped, so running this twice never duplicates anything.
+    - Each order is retried (charge, then save, then check the database) until it exists or
+      REPLAY_ATTEMPTS run out. Orders that still cannot be created are reported as
+      "unrecoverable" instead of being silently dropped."""
     if not _replay_lock.acquire(blocking=False):
         return {"error": "a replay is already running"}
     try:
@@ -105,14 +118,32 @@ def replay_lost_orders():
         with db.connect(db.SOURCE_DB) as c:
             saved = {row[0] for row in c.execute("SELECT order_id FROM orders")}
         lost = [o for oid, o in reqs.items() if resps.get(oid) == "ok" and oid not in saved]
-        replayed = failed = 0
-        for o in lost:
-            # the charge is looked up by order_id (idempotent), retried because the provider is flaky
-            if any(payment.charge(o["order_id"], o["amount"]) == "ok" for _ in range(REPLAY_ATTEMPTS)):
-                replayed += save_order(o, replayed=True)
+        replayed = unrecoverable = 0
+        deadline = time.time() + REPLAY_BUDGET_S
+        for i, o in enumerate(lost):
+            if time.time() > deadline:
+                break
+            done = False
+            for _ in range(REPLAY_ATTEMPTS):
+                if payment.charge(o["order_id"], o["amount"]) != "ok":   # looked up by order_id, so safe to repeat
+                    continue
+                save_order(o, replayed=True)
+                if _is_saved(o["order_id"]):
+                    done = True
+                    break
+            if done:
+                replayed += 1
             else:
-                failed += 1
-        log("shop", "replay_done", found_lost=len(lost), replayed=replayed, still_failed=failed)
-        return {"found_lost": len(lost), "replayed": replayed, "still_failed": failed}
+                unrecoverable += 1
+                log("shop", "replay_unrecoverable", order_id=o["order_id"])
+        not_attempted = len(lost) - replayed - unrecoverable
+        log("shop", "replay_done", found_lost=len(lost), replayed=replayed, unrecoverable=unrecoverable,
+            not_attempted=not_attempted)
+        result = {"found_lost": len(lost), "replayed": replayed, "unrecoverable": unrecoverable,
+                  "not_attempted": not_attempted}
+        if unrecoverable or not_attempted:
+            result["note"] = ("PARTIAL: some orders are still missing. not_attempted can be retried by calling again; "
+                              "unrecoverable ones failed every attempt, so the cause is probably still active.")
+        return result
     finally:
         _replay_lock.release()

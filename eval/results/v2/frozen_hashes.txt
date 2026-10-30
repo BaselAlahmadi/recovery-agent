@@ -1,0 +1,5 @@
+FROZEN before any v2 run
+agent  (agent/*.py)     : 7dff666404
+rules  (eval/methods.py)  : 9af179f477
+hybrid (eval/hybrid.py)   : 0d189ae02a
+v2 scenarios commit        : b4c4651 (git HEAD now b4c4651)

@@ -26,6 +26,8 @@ DEFAULTS = {
     "queue_overflow_policy": "dead_letter",
     # Inventory sync: "verified" copies rows exactly (good); "fast" corrupts some rows (BAD: F3 bug)
     "sync_mode": "verified",
+    # Cosmetic text on receipts. Changing it has no effect on how the shop works (used as a red herring in the eval).
+    "receipt_footer": "",
 }
 
 _seen = {"cfg": None}  # last config we saw, so we can log when it changes

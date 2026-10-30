@@ -22,13 +22,25 @@ sys.path.insert(0, str(ROOT))
 from eval import scoring  # noqa: E402  (pure helpers)
 
 
+SCENARIO_FILES = {"dev": "scenarios.json", "heldout": "scenarios.json", "heldout_v2": "scenarios_v2.json"}
+
+
 def load_scenario(scenario_id):
-    data = json.loads((ROOT / "eval" / "scenarios.json").read_text())
-    for key in ("dev", "heldout"):
-        for s in data[key]:
+    for key in ("dev", "heldout", "heldout_v2"):
+        data = json.loads((ROOT / "eval" / SCENARIO_FILES[key]).read_text())
+        for s in data.get(key, []):
             if s["id"] == scenario_id:
                 return {**s, "set": key, "hold_s": data["meta"]["hold_s"]}
     raise SystemExit(f"unknown scenario {scenario_id}")
+
+
+def hybrid_version():
+    return hashlib.sha256((ROOT / "eval" / "hybrid.py").read_bytes()).hexdigest()[:10]
+
+
+def methods_version():
+    """Hash of the baseline code (rules / restart-all), stored to prove it did not change between runs."""
+    return hashlib.sha256((ROOT / "eval" / "methods.py").read_bytes()).hexdigest()[:10]
 
 
 def agent_version():
@@ -77,7 +89,7 @@ def run_job(sc, method, rep, port, out_dir):
     os.environ.update({k: env[k] for k in ("SHOP_STATE_DIR", "SHOP_SEED", "SHOP_URL", "AGENT_REPORT_DIR")})
     import requests
     from agent import invariants
-    from eval import methods
+    from eval import hybrid, methods
 
     py = sys.executable
     faults = [f["id"] for f in sc["faults"]]
@@ -117,9 +129,12 @@ def run_job(sc, method, rep, port, out_dir):
             chaos("on", f["id"], "--rate", str(f["rate"]))
         sleep_until(sc["agent_at_s"])
 
+        # ---- independent look at what is broken right now (not shown to the method) ----
+        pre_failing = sorted({c["name"] for c in invariants.run_checks(fetch) if not c["ok"]})
+
         # ---- the method under test ----
-        rec = methods.run(method)
-        if method in ("agent", "no_invariants", "no_verify"):
+        rec = hybrid.run() if method == "hybrid" else methods.run(method)
+        if "evidence" in rec:       # an LLM agent ran (alone or after a hybrid handover): write its incident report
             from agent import report
             report.write({**rec, "final_checks": rec.get("final_checks", "")})
 
@@ -162,6 +177,12 @@ def run_job(sc, method, rep, port, out_dir):
         "false_claim": int(rec["outcome"] in ("RESOLVED", "NO_INCIDENT") and not is_recovered),
         "expected_root_causes": ",".join(sc["expected_root_causes"]), "root_causes": ",".join(rec["root_cause_categories"]),
         "root_cause_f1": scoring.root_cause_f1(sc["expected_root_causes"], rec["root_cause_categories"]),
+        "manifested_root_causes": ",".join(scoring.manifested_causes(faults, pre_failing)),
+        "root_cause_f1_manifested": scoring.root_cause_f1(scoring.manifested_causes(faults, pre_failing),
+                                                          rec["root_cause_categories"]),
+        "pre_failing": ",".join(pre_failing), "rules_version": methods_version(), "hybrid_version": hybrid_version(),
+        "handover": rec.get("handover", ""), "handover_reason": rec.get("handover_reason", ""),
+        "matched_rules": rec.get("matched_rules", ""),
         "agent_seconds": rec["agent_seconds"], "time_to_recover_s": rec["agent_seconds"] if is_recovered else None,
         "n_actions": len(names), "actions": ",".join(names), "n_unnecessary": scoring.count_unnecessary(names, faults),
         "duplicate_shipments": a["duplicate_shipments"], "orders_lost": a["told_ok_not_saved"] + a["saved_unaccounted"],

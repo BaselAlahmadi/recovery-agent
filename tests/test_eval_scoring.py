@@ -46,3 +46,32 @@ def test_cost_matches_the_price_table():
     # 1M uncached in + 1M out = $0.10 + $0.50
     assert scoring.cost_usd(1_000_000, 0, 0, 1_000_000) == 0.6
     assert scoring.cost_usd(0, 1_000_000, 0, 0) == 0.01
+
+
+def test_manifested_causes_only_include_faults_that_did_damage():
+    # f2 was injected but its signature never fired (queue never overflowed); f1 did fire
+    assert scoring.manifested_causes(["f1", "f2"], ["requests_vs_saved"]) == ["payment_drop"]
+
+
+def test_manifested_causes_for_novel_fault_is_unknown_and_red_herring_is_ignored():
+    assert scoring.manifested_causes(["f8", "f6"], ["requests_vs_saved"]) == ["unknown"]
+    assert scoring.manifested_causes(["f8"], []) == []
+
+
+def test_manifested_score_is_not_penalised_for_a_latent_fault():
+    expected_all, expected_manifested = ["payment_drop", "queue_loss"], scoring.manifested_causes(["f1", "f2"], ["requests_vs_saved"])
+    predicted = ["payment_drop"]
+    assert scoring.root_cause_f1(expected_all, predicted) < 1.0
+    assert scoring.root_cause_f1(expected_manifested, predicted) == 1.0
+
+
+def test_f6_exempts_requests_vs_saved_and_f7_does_not_exempt_anything():
+    checks = [{"name": "requests_vs_saved", "ok": False}, {"name": "payment_success", "ok": False}]
+    assert scoring.recovered(checks[:1], ["f4", "f6"]) is True
+    assert scoring.recovered(checks[1:], ["f7"]) is False
+
+
+def test_rollback_on_a_red_herring_or_a_novel_storage_fault_is_unnecessary():
+    assert scoring.count_unnecessary(["rollback_config"], ["f8", "f6"]) == 1
+    assert scoring.count_unnecessary(["replay_lost_orders"], ["f8", "f6"]) == 0
+    assert scoring.count_unnecessary(["rollback_config"], ["f7"]) == 0

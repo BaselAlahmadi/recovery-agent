@@ -34,6 +34,12 @@ FAULTS = {
            "desc": "workflow hang: share of orders whose 'pack' step hangs forever"},
     "f5": {"key": "f5_provider_down", "default": 1.0, "deploy": {},
            "desc": "UNFIXABLE: payment provider is down (share of calls that time out)"},
+    "f6": {"key": "f6_save_fail_rate", "default": 0.3, "deploy": {},
+           "desc": "NOVEL, no config change: share of order writes silently lost (same symptom as f1, different cause)"},
+    "f7": {"key": "f7_flaky_rate", "default": 0.4, "deploy": {"payment_retries": 0},
+           "desc": "payment provider flaky (rate) + bad deploy payment_retries=0 (a setting no rule mentions)"},
+    "f8": {"key": "f8_red_herring", "default": 1.0, "deploy": {"receipt_footer": "AUTUMN-SALE"},
+           "desc": "RED HERRING: a harmless config change that breaks nothing (the shop never reads f8_red_herring)"},
 }
 
 

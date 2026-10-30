@@ -42,7 +42,14 @@ def _respond(order_id, status, code=200):
 
 @app.post("/checkout")
 def checkout(order: Order):
-    metrics.inc("checkout_requests")
+    metrics.begin_checkout()          # counts the request AND marks it in flight
+    try:
+        return _handle_checkout(order)
+    finally:
+        metrics.end_checkout()
+
+
+def _handle_checkout(order):
     o = order.model_dump()
     # request log: every request is recorded first, so lost orders can be replayed later
     log("requests", "checkout", **o)

@@ -17,7 +17,7 @@ VERIFY_WAIT_S = 5       # seconds to wait after an action before re-checking
 SYSTEM = """You are the on-call engineer for a small e-commerce shop (checkout+payments, order queue+worker, inventory sync).
 Failures are SILENT: no crashes, no error logs, /health stays ok. Judge health by the invariant checks. Act only on FAIL lines: small gaps on 'ok' lines are normal in-flight noise.
 You get an automatic situation report first. If all invariants pass and you took no actions, call no_incident. Otherwise find the root cause (get_metrics, read_logs, get_shop_config), take the smallest safe action with a reason and confidence, and read the verification returned after each action. Fix the CAUSE first (rollback_config, restart_worker), then repair the DAMAGE it did (replay_lost_orders, requeue_unprocessed, resync_replica, requeue_stuck). Several faults can be active at once: keep going until all invariants pass, then call resolve listing every root-cause category you fixed.
-Escalate instead of retrying if the cause is outside the shop's control (e.g. payment provider down while the config is already last-known-good) or no allowed action helps. Never repeat an action that did not help; never guess. A stuck worker shows as old oldest_in_progress_age and stale heartbeat; its log has 'started' without 'finished'. Be brief."""
+Escalate instead of retrying if the cause is outside the shop's control (e.g. payment provider down while the config is already last-known-good) or no allowed action helps. If an action reports failed or unrecoverable items, repeat it once; if some are still missing, or the damage keeps coming back after you repair it, the cause is still active: escalate as a partial fix and say what is repaired and what is not. Never repeat an action that did not help; never guess. A stuck worker shows as old oldest_in_progress_age and stale heartbeat; its log has 'started' without 'finished'. Be brief."""
 
 
 def clean(text, limit=300):
@@ -28,11 +28,13 @@ def clean(text, limit=300):
 
 
 def categories(values):
-    """Keep only valid root-cause categories (deduplicated, in order); default to unknown."""
+    """Keep only valid root-cause categories (deduplicated, in order); default to unknown.
+    Models sometimes send the list as a string ('["a","b"]' or 'a, b'), so pull the words out of it."""
     if isinstance(values, str):
-        values = [values]
+        values = re.findall(r"[a-z_]+", values.lower())
     out = []
     for v in values or []:
+        v = str(v).strip().lower()
         if v in tools.ROOT_CAUSES and v not in out:
             out.append(v)
     return out or ["unknown"]
@@ -57,7 +59,7 @@ class Agent:
         self.rec = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "model": MODEL, "symptoms": None,
                     "evidence": [], "actions": [], "verification": None, "outcome": None,
                     "root_cause_categories": [], "root_cause_detail": None, "next_steps": None,
-                    "summary": None, "tokens_in": 0, "tokens_out": 0, "cache_read": 0, "cache_write": 0, "turns": 0}
+                    "summary": None, "tool_calls": [], "tokens_in": 0, "tokens_out": 0, "cache_read": 0, "cache_write": 0, "turns": 0}
 
     def _check(self):
         return invariants.run_checks(tools.fetch_metrics)
@@ -131,6 +133,7 @@ class Agent:
 
     def _dispatch(self, name, args):
         """Returns (text_for_model, finished?)."""
+        self.rec["tool_calls"].append({"tool": name, "args": args})     # raw, for the report
         if name in ("resolve", "no_incident", "escalate"):
             return self._finish(name, args)
         if name in tools.ACTIONS:

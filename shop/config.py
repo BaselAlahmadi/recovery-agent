@@ -24,6 +24,8 @@ DEFAULTS = {
     "f2_extra_delay": 0.0,    # F2: extra seconds per fulfillment step (slow backend = load)
     "f3_corrupt_rate": 0.0,   # F3: share of replica rows a buggy sync run corrupts
     "f4_hang_rate": 0.0,      # F4: share of orders whose "pack" step hangs forever
+    "f6_save_fail_rate": 0.0, # F6: share of order writes that are silently lost (storage problem)
+    "f7_flaky_rate": 0.0,     # F7: share of payment calls that time out (provider flaky; the bad deploy is in settings)
     "f5_provider_down": 0.0,  # F5: share of payment calls that time out (1.0 = provider fully down)
 }
 

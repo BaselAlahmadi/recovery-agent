@@ -1,4 +1,5 @@
 """Write the markdown incident report for one agent run."""
+import json
 import os
 import time
 from pathlib import Path
@@ -27,5 +28,8 @@ def write(rec):
     L += ["", "## Verification result", "```", rec["final_checks"], "```", "", "## Summary", rec["summary"] or "-"]
     if rec["next_steps"]:
         L += ["", "## Suggested next steps for a human", rec["next_steps"]]
+    L += ["", "## Raw tool calls (as sent by the model)"]
+    for c in rec.get("tool_calls", []):
+        L.append(f"- `{c['tool']}` {json.dumps(c['args'])[:500]}")
     path.write_text("\n".join(L), encoding="utf-8")
     return path

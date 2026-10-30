@@ -16,6 +16,9 @@ DEFAULTS = {
     "queue_capacity": 1000,   # max orders waiting for the worker
     "step_delay": 0.05,       # seconds each fulfillment step takes
     "sync_interval": 5.0,     # seconds between inventory sync runs
+    # --- fault switches (written by chaos/, 0 = healthy) ---
+    "f1_drop_rate": 0.0,      # F1: share of payments that time out and silently lose the order
+    "f4_hang_rate": 0.0,      # F4: share of orders whose "pack" step hangs forever
 }
 
 

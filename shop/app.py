@@ -33,9 +33,15 @@ def checkout(order: Order):
     # request log: every request is recorded first, so lost orders can be replayed later
     log("requests", "checkout", **o)
 
-    if not payment.charge(order.order_id, order.amount):
+    result = payment.charge(order.order_id, order.amount)
+    if result == "declined":
         metrics.inc("payments_failed")
         return {"status": "payment_failed", "order_id": order.order_id}
+    if result == "timeout":
+        # BUG (this is what fault F1 triggers): a timeout is treated as success, but the
+        # order is never saved or queued, and no error is logged.
+        metrics.inc("payments_ok")
+        return {"status": "ok", "order_id": order.order_id}
     metrics.inc("payments_ok")
 
     with db.connect(db.SOURCE_DB) as c:

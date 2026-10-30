@@ -1,5 +1,6 @@
 """Order queue + worker thread running the fulfillment workflow (reserve -> pack -> ship)."""
 import queue
+import random
 import threading
 import time
 
@@ -10,6 +11,7 @@ STEPS = ["reserve", "pack", "ship"]
 
 order_queue = queue.Queue(maxsize=config.get("queue_capacity"))
 in_progress = {}            # order_id -> time the worker started it
+hang_forever = threading.Event()  # never set -> waiting on it blocks forever (F4)
 heartbeat = {"ts": time.time()}  # worker updates this every loop; stale = worker is stuck/dead
 
 
@@ -29,6 +31,9 @@ def _fulfill(order):
     """Run each workflow step and record it in the fulfillment table."""
     for step in STEPS:
         time.sleep(config.get("step_delay"))
+        # FAULT F4: the "pack" step sometimes never returns. No error, no log line.
+        if step == "pack" and random.random() < config.get("f4_hang_rate"):
+            hang_forever.wait()
         with db.connect(db.SOURCE_DB) as c:
             c.execute("INSERT INTO fulfillment VALUES (?, ?, ?)", (order["order_id"], step, time.time()))
         heartbeat["ts"] = time.time()

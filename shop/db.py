@@ -29,8 +29,12 @@ def init_db():
         c.executemany("INSERT INTO inventory VALUES (?, 1000)", [(s,) for s in SKUS])
 
 
+def rows_checksum(rows):
+    """Short hash of (sku, stock) rows."""
+    return hashlib.sha256(repr(sorted(rows)).encode()).hexdigest()[:12]
+
+
 def inventory_checksum(path):
-    """One hash of the whole inventory table. Source and replica should match."""
+    """Hash of the whole inventory table in one DB file."""
     with connect(path) as c:
-        rows = c.execute("SELECT sku, stock FROM inventory ORDER BY sku").fetchall()
-    return hashlib.sha256(repr(rows).encode()).hexdigest()[:12]
+        return rows_checksum(c.execute("SELECT sku, stock FROM inventory").fetchall())

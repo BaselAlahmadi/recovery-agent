@@ -63,3 +63,16 @@ def health():
 @app.get("/metrics")
 def get_metrics():
     return {**metrics.snapshot(), **worker.stats(), "sync": sync.stats()}
+
+
+# ---- Admin endpoints: the ONLY actions the recovery agent is allowed to take ----
+@app.post("/admin/restart_worker")
+def admin_restart_worker():
+    """Start a fresh worker, retire the stuck one, park its unfinished orders."""
+    return worker.restart()
+
+
+@app.post("/admin/requeue_stuck")
+def admin_requeue_stuck():
+    """Put parked orders back on the queue."""
+    return worker.requeue_parked()

@@ -29,3 +29,11 @@ def get(key):
     except (OSError, ValueError):  # file missing or half-written -> use defaults
         data = {}
     return data.get(key, DEFAULTS[key])
+
+
+def modified_at():
+    """When the runtime config file last changed (0 if it doesn't exist). Used by fault F4."""
+    try:
+        return RUNTIME_CONFIG.stat().st_mtime
+    except OSError:
+        return 0.0

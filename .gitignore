@@ -1,4 +1,7 @@
 .env
 __pycache__/
-*.logdata/
+*.log
+data/
 logs/*.jsonl
+reports/*.md
+chaos/runtime_config.json

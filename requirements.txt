@@ -1,0 +1,13 @@
+# Direct dependencies, pinned to the versions the results were produced with (Python 3.14).
+# Licences of these and of everything they pull in are listed in README.md and re-checkable
+# with:  python scripts/check_licenses.py
+fastapi==0.162.0
+uvicorn==0.54.0
+pydantic==2.14.1
+requests==2.34.2
+anthropic==2.3.0
+python-dotenv==1.2.4
+colorama==0.4.6        # coloured demo output
+pandas==3.1.0          # eval summary tables
+matplotlib==3.11.2     # eval charts (offline tool, not part of the running system)
+pytest==9.2.0

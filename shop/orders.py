@@ -1,5 +1,6 @@
 """Saving orders, and replaying orders that were lost."""
 import json
+import queue
 import threading
 import time
 
@@ -42,6 +43,53 @@ def _read_request_log():
         elif r["event"] == "response":
             resps[r["order_id"]] = r["status"]
     return reqs, resps
+
+
+REQUEUE_GRACE_S = 5          # orders younger than this may simply be between "saved" and "queued"
+_requeue_lock = threading.Lock()
+
+
+def requeue_unprocessed():
+    """Re-queue orders that were saved but never processed: dropped from a full queue, or
+    sitting in the dead-letter list. Skips anything already shipped, queued, being worked on
+    or parked, so it never creates duplicates and a second call finds nothing."""
+    if not _requeue_lock.acquire(blocking=False):
+        return {"error": "a requeue is already running"}
+    try:
+        worker.apply_capacity()     # the queue limit may just have been raised by a rollback
+        from_dead_letter = 0
+        while worker.dead_letter:
+            try:
+                worker.order_queue.put_nowait(worker.dead_letter[0])
+            except queue.Full:
+                break
+            worker.dead_letter.pop(0)
+            from_dead_letter += 1
+
+        cutoff = time.time() - REQUEUE_GRACE_S
+
+        def candidates():
+            with db.connect(db.SOURCE_DB) as c:
+                rows = c.execute("SELECT order_id, sku, qty, amount FROM orders WHERE created < ? AND order_id "
+                                 "NOT IN (SELECT order_id FROM fulfillment WHERE step = 'ship')", (cutoff,)).fetchall()
+            present = worker.present_ids()
+            return {r[0]: dict(zip(("order_id", "sku", "qty", "amount"), r)) for r in rows if r[0] not in present}
+
+        first = candidates()
+        time.sleep(0.3)             # an order being handed from the queue to the worker is briefly in neither
+        second = candidates()
+        lost = [o for oid, o in second.items() if oid in first]
+        requeued = 0
+        for o in lost:
+            try:
+                worker.order_queue.put_nowait(o)
+            except queue.Full:
+                break
+            requeued += 1
+        log("shop", "requeue_done", from_dead_letter=from_dead_letter, lost_found=len(lost), requeued=requeued)
+        return {"requeued_from_dead_letter": from_dead_letter, "lost_found": len(lost), "requeued_lost": requeued}
+    finally:
+        _requeue_lock.release()
 
 
 def replay_lost_orders():

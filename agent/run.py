@@ -17,7 +17,8 @@ def main():
     rec = Agent().run()
     path = report.write(rec)
     print(f"{rec['outcome']} | actions={[a['action'] for a in rec['actions']]} | "
-          f"tokens={rec['tokens_in']}+{rec['tokens_out']} | report: {path}")
+          f"turns={rec['turns']} | tokens in={rec['tokens_in']} cached={rec['cache_read']} out={rec['tokens_out']} | "
+          f"causes={rec['root_cause_categories']} | report: {path}")
 
 
 if __name__ == "__main__":

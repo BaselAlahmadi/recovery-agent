@@ -8,8 +8,9 @@ def healthy():
     """Metrics from a shop that is working fine."""
     return {
         "checkout_requests": 100, "payments_failed": 0, "orders_saved": 100,
-        "enqueued": 100, "processed": 90, "pending": 9, "in_progress": 1, "parked": 0,
+        "enqueued": 100, "processed": 90, "pending": 9, "in_progress": 1, "parked": 0, "dead_letter": 0,
         "oldest_in_progress_age_s": 0.1, "worker_heartbeat_age_s": 0.05,
+        "checkout_last_30s": 40, "failed_last_30s": 1,
         "sync": {"runs": 3, "copied_checksum": "abc", "replica_checksum": "abc"},
     }
 
@@ -21,7 +22,7 @@ def failing(m):
 def test_healthy_shop_passes_everything():
     results = invariants.check(healthy())
     assert invariants.all_ok(results)
-    assert len(results) == 5 + 1  # six named checks
+    assert len(results) == 8  # eight named checks
 
 
 def test_silent_payment_drop_is_caught():
@@ -67,6 +68,38 @@ def test_parked_orders_are_flagged_but_still_accounted_for():
     m = healthy()
     m["pending"], m["parked"] = 8, 1       # one order moved from the queue to "parked"
     assert failing(m) == {"no_parked_orders"}   # not queue_accounting: nothing is missing
+
+
+def test_silently_dropped_queue_orders_are_caught():
+    m = healthy()
+    m["enqueued"] = 140                    # F2: 40 orders counted as enqueued, then thrown away
+    assert failing(m) == {"queue_accounting"}
+
+
+def test_dead_lettered_orders_are_accounted_for_but_flagged():
+    m = healthy()
+    m["pending"], m["dead_letter"] = 4, 5  # 5 orders overflowed into the dead-letter list
+    assert failing(m) == {"no_dead_letters"}
+
+
+def test_payment_outage_is_caught_even_though_counters_balance():
+    m = healthy()
+    m["checkout_last_30s"], m["failed_last_30s"] = 40, 40   # F5: every checkout fails honestly
+    assert failing(m) == {"payment_success"}
+
+
+def test_few_recent_checkouts_are_not_judged():
+    m = healthy()
+    m["checkout_last_30s"], m["failed_last_30s"] = invariants.MIN_CHECKOUTS - 1, invariants.MIN_CHECKOUTS - 1
+    assert failing(m) == set()             # not enough data to call it an outage
+
+
+def test_failure_rate_boundary():
+    m = healthy()
+    m["checkout_last_30s"], m["failed_last_30s"] = 40, 10   # exactly 25%
+    assert failing(m) == set()
+    m["failed_last_30s"] = 11
+    assert failing(m) == {"payment_success"}
 
 
 def test_replica_corruption_is_caught():

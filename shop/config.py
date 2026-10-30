@@ -13,12 +13,14 @@ RUNTIME_CONFIG = ROOT / "chaos" / "runtime_config.json"
 
 # Healthy defaults. A key in the runtime config file overrides the default.
 DEFAULTS = {
-    "queue_capacity": 1000,   # max orders waiting for the worker
     "step_delay": 0.05,       # seconds each fulfillment step takes
     "sync_interval": 5.0,     # seconds between inventory sync runs
-    # --- fault switches (written by chaos/, 0 = healthy) ---
-    "f1_drop_rate": 0.0,      # F1: share of payments that time out and silently lose the order
+    # --- environment conditions injected by chaos/ (0 = healthy) ---
+    "f1_drop_rate": 0.0,      # F1: share of payment calls that time out (flaky provider)
+    "f2_extra_delay": 0.0,    # F2: extra seconds per fulfillment step (slow backend = load)
+    "f3_corrupt_rate": 0.0,   # F3: share of replica rows a buggy sync run corrupts
     "f4_hang_rate": 0.0,      # F4: share of orders whose "pack" step hangs forever
+    "f5_provider_down": 0.0,  # F5: share of payment calls that time out (1.0 = provider fully down)
 }
 
 

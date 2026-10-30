@@ -32,6 +32,7 @@ def startup():
 def _respond(order_id, status, code=200):
     """Answer the customer AND record what we told them (needed to find 'told ok, never saved')."""
     log("requests", "response", order_id=order_id, status=status)
+    metrics.record_outcome(status == "ok")
     return JSONResponse({"status": status, "order_id": order_id}, status_code=code)
 
 
@@ -107,3 +108,15 @@ def admin_rollback_config():
 def admin_replay_lost_orders():
     """Replay orders that were acknowledged but never saved (never duplicates)."""
     return orders.replay_lost_orders()
+
+
+@app.post("/admin/requeue_unprocessed")
+def admin_requeue_unprocessed():
+    """Re-queue saved orders that never got processed (dropped from the queue / dead-lettered)."""
+    return orders.requeue_unprocessed()
+
+
+@app.post("/admin/resync_replica")
+def admin_resync_replica():
+    """Run an inventory sync right now (with the shop's current sync settings)."""
+    return sync.resync()

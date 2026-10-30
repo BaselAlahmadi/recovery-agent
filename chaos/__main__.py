@@ -5,12 +5,12 @@
   python -m chaos list                 show active faults
   python -m chaos clear                turn everything off
 
-Faults are keys in chaos/runtime_config.json; the shop re-reads that file live.
-Several faults can be on at once because each one has its own key.
-
-F1 has two parts: the payment provider becomes flaky (runtime config), AND a bad setting
-is "deployed" into the shop's own config (data/shop_config.json). Start the shop first.
-`off f1` / `clear` also put the shop's config back, so the environment is clean again.
+Each fault has up to two parts:
+  1. an ENVIRONMENT condition, a key in chaos/runtime_config.json (flaky provider, slow worker...)
+  2. a bad DEPLOY: wrong values written into the shop's own config (data/shop_config.json)
+     while its last-known-good copy stays untouched, so the agent can roll back.
+Several faults can be on at once because each one has its own keys. Start the shop first.
+`off fX` puts back only that fault's deployed settings; `clear` resets everything.
 """
 import argparse
 import json
@@ -20,10 +20,20 @@ import shutil
 from shop import settings
 from shop.config import RUNTIME_CONFIG
 
-# fault id -> (config key the shop reads, default strength, description)
 FAULTS = {
-    "f1": ("f1_drop_rate", 0.3, "payment drop: provider is flaky AND a bad 'assume success on timeout' config is deployed"),
-    "f4": ("f4_hang_rate", 0.1, "workflow hang: share of orders whose 'pack' step hangs forever"),
+    "f1": {"key": "f1_drop_rate", "default": 0.3,
+           "deploy": {"payment_timeout_policy": "assume_success"},
+           "desc": "payment drop: provider flaky (rate) + bad deploy 'assume success on timeout'"},
+    "f2": {"key": "f2_extra_delay", "default": 0.1,
+           "deploy": {"queue_capacity": 10, "queue_overflow_policy": "drop"},
+           "desc": "queue loss: worker slower by <rate> s/step (load) + bad deploy 'tiny queue, silently drop'"},
+    "f3": {"key": "f3_corrupt_rate", "default": 0.1,
+           "deploy": {"sync_mode": "fast"},
+           "desc": "sync corruption: share of replica rows corrupted per run + bad deploy sync_mode=fast"},
+    "f4": {"key": "f4_hang_rate", "default": 0.1, "deploy": {},
+           "desc": "workflow hang: share of orders whose 'pack' step hangs forever"},
+    "f5": {"key": "f5_provider_down", "default": 1.0, "deploy": {},
+           "desc": "UNFIXABLE: payment provider is down (share of calls that time out)"},
 }
 
 
@@ -41,53 +51,59 @@ def write(data):
     os.replace(tmp, RUNTIME_CONFIG)
 
 
-def deploy_bad_payment_config():
+def deploy(changes):
     """Simulate a bad deploy: change ONLY the live shop config (last-known-good stays untouched)."""
+    if not changes:
+        return
     if not settings.CONFIG_PATH.exists():
-        print("warning: shop config not found. Start the shop first, then turn F1 on.")
+        print("warning: shop config not found. Start the shop first, then turn the fault on.")
         return
     cfg = json.loads(settings.CONFIG_PATH.read_text())
-    cfg["payment_timeout_policy"] = "assume_success"
+    cfg.update(changes)
     settings.write_atomic(settings.CONFIG_PATH, cfg)
 
 
-def restore_shop_config():
-    """Environment reset: put the live shop config back to the last-known-good copy."""
-    if settings.LKG_PATH.exists():
-        shutil.copyfile(settings.LKG_PATH, settings.CONFIG_PATH)
+def undeploy(keys):
+    """Environment reset for one fault: put just these keys back to their last-known-good values."""
+    if not keys or not settings.CONFIG_PATH.exists():
+        return
+    cfg = json.loads(settings.CONFIG_PATH.read_text())
+    lkg = json.loads(settings.LKG_PATH.read_text())
+    cfg.update({k: lkg[k] for k in keys if k in lkg})
+    settings.write_atomic(settings.CONFIG_PATH, cfg)
 
 
 def main():
     p = argparse.ArgumentParser(prog="chaos")
     p.add_argument("cmd", choices=["on", "off", "list", "clear"])
     p.add_argument("fault", nargs="?", choices=list(FAULTS))
-    p.add_argument("--rate", type=float, help="fault strength between 0 and 1")
+    p.add_argument("--rate", type=float, help="fault strength (meaning depends on the fault)")
     a = p.parse_args()
 
     cfg = read()
     if a.cmd in ("on", "off") and not a.fault:
         p.error(f"'{a.cmd}' needs a fault name: {', '.join(FAULTS)}")
     if a.cmd == "on":
-        key, default, _ = FAULTS[a.fault]
-        cfg[key] = a.rate if a.rate is not None else default
+        f = FAULTS[a.fault]
+        cfg[f["key"]] = a.rate if a.rate is not None else f["default"]
         write(cfg)
-        if a.fault == "f1":
-            deploy_bad_payment_config()
+        deploy(f["deploy"])
     elif a.cmd == "off":
-        cfg.pop(FAULTS[a.fault][0], None)
+        f = FAULTS[a.fault]
+        cfg.pop(f["key"], None)
         write(cfg)
-        if a.fault == "f1":
-            restore_shop_config()
+        undeploy(list(f["deploy"]))
     elif a.cmd == "clear":
         write({})
         cfg = {}
-        restore_shop_config()
+        if settings.LKG_PATH.exists():
+            shutil.copyfile(settings.LKG_PATH, settings.CONFIG_PATH)
 
-    active = {f: cfg[k] for f, (k, _, _) in FAULTS.items() if k in cfg}
+    active = {n: cfg[f["key"]] for n, f in FAULTS.items() if f["key"] in cfg}
     print("active faults:", active or "none")
     if a.cmd == "list":
-        for f, (_, _, desc) in FAULTS.items():
-            print(f"  {f}: {desc}")
+        for n, f in FAULTS.items():
+            print(f"  {n}: {f['desc']}")
 
 
 if __name__ == "__main__":

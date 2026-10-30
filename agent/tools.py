@@ -19,10 +19,12 @@ ACTIONS = {
     "requeue_stuck": "/admin/requeue_stuck",
     "rollback_config": "/admin/rollback_config",
     "replay_lost_orders": "/admin/replay_lost_orders",
+    "requeue_unprocessed": "/admin/requeue_unprocessed",
+    "resync_replica": "/admin/resync_replica",
 }
 
-# Root-cause categories: a fixed list, so reports are clean and can be scored automatically.
-ROOT_CAUSES = ["stuck_worker", "bad_config", "queue_overflow", "sync_corruption", "external_provider", "unknown"]
+# Root-cause categories = which part of the shop failed. A fixed list keeps reports clean and scoreable.
+ROOT_CAUSES = ["payment_drop", "queue_loss", "sync_corruption", "stuck_worker", "external_provider", "unknown"]
 
 
 def fetch_metrics():
@@ -42,17 +44,17 @@ def metrics_text(m):
     s = m["sync"]
     flat = {k: v for k, v in m.items() if k != "sync"}
     flat.update(sync_runs=s["runs"], sync_checksums_match=s["copied_checksum"] == s["replica_checksum"])
-    return json.dumps(flat)
+    return json.dumps(flat, separators=(",", ":"))
 
 
-def read_logs(component, n=8):
+def read_logs(component, n=6):
     if component not in LOG_COMPONENTS:
         return f"unknown log '{component}'. choose from {LOG_COMPONENTS}"
     path = LOG_DIR / f"{component}.jsonl"
     if not path.exists():
         return "(no log file)"
-    lines = path.read_text(encoding="utf-8").splitlines()[-min(int(n), 20):]
-    return "\n".join(l[:200] for l in lines) or "(empty)"
+    lines = path.read_text(encoding="utf-8").splitlines()[-min(int(n), 15):]
+    return "\n".join(l[:160] for l in lines) or "(empty)"
 
 
 def call_action(name):
@@ -61,12 +63,14 @@ def call_action(name):
 
 
 _ACTION_PROPS = {
-    "reason": {"type": "string", "description": "Evidence-based reason for this action"},
-    "confidence": {"type": "number", "description": "0-1 confidence that this is the right action"},
+    "reason": {"type": "string", "description": "Evidence-based reason"},
+    "confidence": {"type": "number", "description": "0-1"},
 }
 _ROOT_CAUSE_PROPS = {
-    "root_cause_category": {"type": "string", "enum": ROOT_CAUSES},
-    "root_cause_detail": {"type": "string", "description": "One plain sentence. No markup or tags."},
+    "root_cause_categories": {"type": "array", "items": {"type": "string", "enum": ROOT_CAUSES},
+                              "description": "Every failing part (payment_drop=orders told ok but not saved, "
+                                             "queue_loss, sync_corruption, stuck_worker, external_provider=outside shop control)"},
+    "root_cause_detail": {"type": "string", "description": "One plain sentence. No markup."},
 }
 
 
@@ -77,41 +81,30 @@ def _action(name, description):
 
 # Tool definitions shown to the model.
 TOOLS = [
-    {"name": "check_invariants",
-     "description": "Run all business-invariant checks (the shop's vital signs). Always start here.",
+    {"name": "check_invariants", "description": "Run all invariant checks now.",
      "input_schema": {"type": "object", "properties": {}}},
-    {"name": "get_metrics",
-     "description": "Raw /metrics counters.",
+    {"name": "get_metrics", "description": "Raw /metrics counters.",
      "input_schema": {"type": "object", "properties": {}}},
-    {"name": "check_health",
-     "description": "Call /health. Only says the process is up, not that the shop works.",
+    {"name": "check_health", "description": "/health: only says the process is up.",
      "input_schema": {"type": "object", "properties": {}}},
-    {"name": "get_shop_config",
-     "description": "Read-only: the shop's live config next to its last-known-good config, and what differs.",
+    {"name": "get_shop_config", "description": "Shop's live config vs last-known-good, and what differs.",
      "input_schema": {"type": "object", "properties": {}}},
-    {"name": "read_logs",
-     "description": f"Last lines of one component log. Components: {LOG_COMPONENTS}",
+    {"name": "read_logs", "description": f"Last lines of a log. Components: {LOG_COMPONENTS}",
      "input_schema": {"type": "object", "properties": {"component": {"type": "string"}, "n": {"type": "integer"}},
                       "required": ["component"]}},
-    _action("restart_worker", "Start a fresh order worker and retire the stuck one. Its unfinished orders are "
-                              "PARKED (not lost) until you call requeue_stuck. Use when the worker is stuck/hung."),
-    _action("requeue_stuck", "Put parked orders back on the queue so they get processed. Use after restart_worker."),
-    _action("rollback_config", "Restore the shop's configuration to its last-known-good version. Use when a bad "
-                               "config change is the cause. Stops NEW damage; does not repair orders already lost."),
-    _action("replay_lost_orders", "Re-create orders that customers were told succeeded but were never saved, by "
-                                  "replaying the request log. Safe to repeat (never duplicates). Do this AFTER the "
-                                  "cause is fixed, otherwise new orders keep getting lost."),
-    {"name": "no_incident",
-     "description": "Everything is healthy and you took no actions: report that there is no incident. "
-                    "Only accepted if all invariants pass and you took no actions.",
+    _action("restart_worker", "Fresh worker replaces a stuck one; its unfinished orders are parked until requeue_stuck."),
+    _action("requeue_stuck", "Put parked orders back on the queue (after restart_worker)."),
+    _action("rollback_config", "Restore ALL shop config to last-known-good. Fixes a bad deploy; repairs no damage already done."),
+    _action("replay_lost_orders", "Re-create orders customers were told 'ok' but that were never saved. Idempotent. Do after the cause is fixed."),
+    _action("requeue_unprocessed", "Re-queue saved orders that never got processed (dropped from the queue or dead-lettered). Idempotent."),
+    _action("resync_replica", "Run an inventory sync now using current sync settings (repairs corrupted replica rows once the cause is fixed)."),
+    {"name": "no_incident", "description": "All invariants pass and you took no actions.",
      "input_schema": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}},
-    {"name": "resolve",
-     "description": "Declare an incident fixed (you took actions). Only accepted if all invariants pass right now.",
+    {"name": "resolve", "description": "Incident fixed by your actions; accepted only if all invariants pass now.",
      "input_schema": {"type": "object", "properties": {**_ROOT_CAUSE_PROPS, "summary": {"type": "string"}},
-                      "required": ["root_cause_category", "root_cause_detail", "summary"]}},
-    {"name": "escalate",
-     "description": "Hand over to a human when you cannot fix this safely or confidently.",
+                      "required": ["root_cause_categories", "root_cause_detail", "summary"]}},
+    {"name": "escalate", "description": "Hand over to a human: cannot fix safely, cause outside the shop, or no allowed action helps.",
      "input_schema": {"type": "object", "properties": {**_ROOT_CAUSE_PROPS, "reason": {"type": "string"},
                                                        "suggested_next_steps": {"type": "string"}},
-                      "required": ["reason", "root_cause_category"]}},
+                      "required": ["reason", "root_cause_categories", "suggested_next_steps"]}},
 ]

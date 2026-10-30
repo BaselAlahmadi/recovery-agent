@@ -5,7 +5,9 @@ Each check says "is the shop actually doing its job?", not "is there an error in
 import time
 
 SLA_S = 10             # an order in progress (or a silent worker) longer than this is a problem
-REQUEST_TOLERANCE = 5 # requests currently being handled (in flight) look like a small gap
+REQUEST_TOLERANCE = 5  # requests currently being handled (in flight) look like a small gap
+MIN_CHECKOUTS = 10     # need at least this many recent checkouts to judge the failure rate
+MAX_FAIL_RATE = 0.25   # more than this share of recent checkouts failing = outage
 
 
 def check(m):
@@ -20,12 +22,12 @@ def check(m):
     add("requests_vs_saved", gap <= REQUEST_TOLERANCE,
         f"requests={m['checkout_requests']} payments_failed={m['payments_failed']} saved={m['orders_saved']} gap={gap}")
 
-    # 2. Every enqueued order must be somewhere: done, waiting, being worked on, or parked.
-    accounted = m["processed"] + m["pending"] + m["in_progress"] + m["parked"]
+    # 2. Every enqueued order must be somewhere: done, waiting, being worked on, parked or dead-lettered.
+    accounted = m["processed"] + m["pending"] + m["in_progress"] + m["parked"] + m["dead_letter"]
     gap = m["enqueued"] - accounted
     add("queue_accounting", gap == 0,
         f"enqueued={m['enqueued']} processed={m['processed']} pending={m['pending']} "
-        f"in_progress={m['in_progress']} parked={m['parked']} missing={gap}")
+        f"in_progress={m['in_progress']} parked={m['parked']} dead_letter={m['dead_letter']} missing={gap}")
 
     # 3. Nothing may be in progress longer than the SLA, and the worker must show signs of life.
     add("oldest_in_progress_age", m["oldest_in_progress_age_s"] <= SLA_S,
@@ -33,13 +35,20 @@ def check(m):
     add("worker_heartbeat", m["worker_heartbeat_age_s"] <= SLA_S,
         f"last sign of life {m['worker_heartbeat_age_s']}s ago (SLA {SLA_S}s)")
 
-    # 4. Orders taken from a stuck worker must be put back on the queue.
+    # 4. Orders taken from a stuck worker, or overflowed into the dead-letter list, must be requeued.
     add("no_parked_orders", m["parked"] == 0, f"parked={m['parked']}")
+    add("no_dead_letters", m["dead_letter"] == 0, f"dead_letter={m['dead_letter']}")
 
     # 5. The replica must hold exactly what the last sync run copied.
     s = m["sync"]
     ok = s["runs"] == 0 or s["copied_checksum"] == s["replica_checksum"]
     add("replica_checksum", ok, f"copied={s['copied_checksum']} replica={s['replica_checksum']}")
+
+    # 6. Customers must be able to check out. Honest failures keep the counters above consistent,
+    #    so an outage (e.g. payment provider down) is only visible as a high recent failure rate.
+    n, k = m["checkout_last_30s"], m["failed_last_30s"]
+    add("payment_success", n < MIN_CHECKOUTS or k / n <= MAX_FAIL_RATE,
+        f"{k} of {n} checkouts failed in the last 30s (max {int(MAX_FAIL_RATE * 100)}%)")
     return out
 
 

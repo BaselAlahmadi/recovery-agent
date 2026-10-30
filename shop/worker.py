@@ -4,34 +4,57 @@ import random
 import threading
 import time
 
-from shop import config, db, metrics
+from shop import config, db, metrics, settings
 from shop.logger import log
 
 STEPS = ["reserve", "pack", "ship"]
 
-order_queue = queue.Queue(maxsize=config.get("queue_capacity"))
+order_queue = queue.Queue()  # size limit is applied live from the shop settings (apply_capacity)
 in_progress = {}            # order_id -> {"started": time, "order": order} being worked on right now
 parked = []                 # unfinished orders taken from a stuck worker, waiting to be requeued
+dead_letter = []            # orders that did not fit in a full queue (healthy overflow policy)
 heartbeat = {"ts": time.time()}  # worker updates this every loop; stale = worker is stuck/dead
 state = {"gen": 0, "release": None}  # which worker thread is current (restart bumps "gen")
 
 
+def apply_capacity():
+    """Queue.maxsize is checked on every put, so changing it takes effect immediately."""
+    order_queue.maxsize = settings.get("queue_capacity")
+
+
 def enqueue(order):
-    """Put an order on the queue. If full, reject loudly (silent drops come later as a fault)."""
+    """Put an order on the queue. When it is full, the overflow policy decides what happens."""
+    apply_capacity()
     try:
         order_queue.put_nowait(order)
     except queue.Full:
-        log("queue", "rejected_full", order_id=order["order_id"])
-        return False
+        metrics.inc("enqueued")
+        if settings.get("queue_overflow_policy") == "drop":
+            # BUG (bad config for fault F2): the order is thrown away, but it is still counted
+            # as enqueued and nothing is logged.
+            return True
+        dead_letter.append(order)
+        log("queue", "dead_lettered", order_id=order["order_id"])
+        return True
     metrics.inc("enqueued")
     log("queue", "enqueued", order_id=order["order_id"])
     return True
 
 
+def present_ids():
+    """Every order id the shop currently 'knows about' as waiting or being worked on."""
+    with order_queue.mutex:
+        ids = {o["order_id"] for o in order_queue.queue}
+    ids |= set(list(in_progress))
+    ids |= {o["order_id"] for o in list(parked)}
+    ids |= {o["order_id"] for o in list(dead_letter)}
+    return ids
+
+
 def _fulfill(order, started_at, release):
     """Run each workflow step. Returns False if the worker got stuck and was later retired."""
     for step in STEPS:
-        time.sleep(config.get("step_delay"))
+        time.sleep(config.get("step_delay") + config.get("f2_extra_delay"))
         # FAULT F4: a worker that was already running when the fault was switched on has a
         # "stale connection": its "pack" step sometimes never returns. No error, no log line.
         # A worker started AFTER that (e.g. by a restart) is healthy.
@@ -86,6 +109,7 @@ def restart():
 
 def requeue_parked():
     """Move parked orders back onto the queue (they were already counted as enqueued)."""
+    apply_capacity()
     n = 0
     while parked:
         try:
@@ -105,6 +129,7 @@ def stats():
         "pending": order_queue.qsize(),
         "in_progress": len(in_progress),
         "parked": len(parked),
+        "dead_letter": len(dead_letter),
         "oldest_in_progress_age_s": round(oldest, 2),
         "worker_heartbeat_age_s": round(now - heartbeat["ts"], 2),
     }

@@ -1,23 +1,40 @@
 """Inventory sync job: copies source inventory to the replica every few seconds."""
+import random
 import threading
 import time
 
-from shop import config, db
+from shop import config, db, settings
 from shop.logger import log
 
 state = {"runs": 0, "last_run_ts": 0.0, "rows_synced": 0, "copied_checksum": None}
+_lock = threading.Lock()   # the scheduled run and a manual resync never overlap
 
 
 def sync_once():
-    with db.connect(db.SOURCE_DB) as src:
-        rows = src.execute("SELECT sku, stock FROM inventory").fetchall()
-    with db.connect(db.REPLICA_DB) as rep:
-        rep.executemany("INSERT OR REPLACE INTO inventory VALUES (?, ?)", rows)
-    state["runs"] += 1
-    state["last_run_ts"] = time.time()
-    state["rows_synced"] = len(rows)
-    state["copied_checksum"] = db.rows_checksum(rows)  # what the replica SHOULD now contain
-    log("sync", "run_done", rows=len(rows))
+    with _lock:
+        with db.connect(db.SOURCE_DB) as src:
+            rows = src.execute("SELECT sku, stock FROM inventory").fetchall()
+        to_write = rows
+        # FAULT F3: with the bad "fast" sync mode, a few replica rows are silently written wrong
+        # on every run. The log line below looks exactly the same as a healthy run.
+        rate = config.get("f3_corrupt_rate")
+        if settings.get("sync_mode") == "fast" and rate > 0:
+            bad = set(random.sample(range(len(rows)), max(1, round(rate * len(rows)))))
+            to_write = [(sku, stock + random.randint(1, 9)) if i in bad else (sku, stock)
+                        for i, (sku, stock) in enumerate(rows)]
+        with db.connect(db.REPLICA_DB) as rep:
+            rep.executemany("INSERT OR REPLACE INTO inventory VALUES (?, ?)", to_write)
+        state["runs"] += 1
+        state["last_run_ts"] = time.time()
+        state["rows_synced"] = len(rows)
+        state["copied_checksum"] = db.rows_checksum(rows)  # what the replica SHOULD now contain
+        log("sync", "run_done", rows=len(rows))
+
+
+def resync():
+    """Admin action: run a sync right now, using the shop's current sync settings."""
+    sync_once()
+    return {"resynced_rows": state["rows_synced"], "sync_mode": settings.get("sync_mode")}
 
 
 def _run():

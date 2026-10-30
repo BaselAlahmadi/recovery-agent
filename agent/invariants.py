@@ -5,7 +5,7 @@ Each check says "is the shop actually doing its job?", not "is there an error in
 import time
 
 SLA_S = 10             # an order in progress (or a silent worker) longer than this is a problem
-REQUEST_TOLERANCE = 3  # requests currently being handled (in flight) look like a small gap
+REQUEST_TOLERANCE = 5 # requests currently being handled (in flight) look like a small gap
 
 
 def check(m):

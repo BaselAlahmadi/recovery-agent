@@ -8,6 +8,14 @@ from shop.config import LOG_DIR
 _lock = threading.Lock()
 
 
+def reset():
+    """Delete old log files so every shop start begins with clean logs."""
+    LOG_DIR.mkdir(exist_ok=True)
+    with _lock:
+        for p in LOG_DIR.glob("*.jsonl"):
+            p.unlink()
+
+
 def log(component, event, **fields):
     """Append {"ts":..., "component":..., "event":..., ...fields} to logs/<component>.jsonl."""
     LOG_DIR.mkdir(exist_ok=True)

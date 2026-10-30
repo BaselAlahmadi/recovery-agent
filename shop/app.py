@@ -2,9 +2,10 @@
 import time
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from shop import db, metrics, payment, sync, worker
+from shop import db, logger, metrics, orders, payment, settings, sync, worker
 from shop.logger import log
 
 app = FastAPI(title="shop")
@@ -20,10 +21,18 @@ class Order(BaseModel):
 
 @app.on_event("startup")
 def startup():
+    logger.reset()       # fresh logs + fresh DB + fresh config every start (replay relies on this match)
     db.init_db()
+    settings.init()
     worker.start()
     sync.start()
     log("shop", "started")
+
+
+def _respond(order_id, status, code=200):
+    """Answer the customer AND record what we told them (needed to find 'told ok, never saved')."""
+    log("requests", "response", order_id=order_id, status=status)
+    return JSONResponse({"status": status, "order_id": order_id}, status_code=code)
 
 
 @app.post("/checkout")
@@ -33,25 +42,29 @@ def checkout(order: Order):
     # request log: every request is recorded first, so lost orders can be replayed later
     log("requests", "checkout", **o)
 
+    policy = settings.get("payment_timeout_policy")
     result = payment.charge(order.order_id, order.amount)
-    if result == "declined":
-        metrics.inc("payments_failed")
-        return {"status": "payment_failed", "order_id": order.order_id}
+
     if result == "timeout":
-        # BUG (this is what fault F1 triggers): a timeout is treated as success, but the
-        # order is never saved or queued, and no error is logged.
-        metrics.inc("payments_ok")
-        return {"status": "ok", "order_id": order.order_id}
+        metrics.inc("payment_timeouts")
+        if policy == "assume_success":
+            # BUG (this is what the bad config for fault F1 turns on): a timeout is treated as
+            # success, but the order is never saved or queued, and no error is logged.
+            metrics.inc("payments_ok")
+            return _respond(order.order_id, "ok")
+        for _ in range(settings.get("payment_retries")):    # healthy policy: retry, then give up
+            result = payment.charge(order.order_id, order.amount)
+            if result != "timeout":
+                break
+            metrics.inc("payment_timeouts")
+
+    if result != "ok":      # declined, or still timing out: tell the customer honestly
+        metrics.inc("payments_failed")
+        return _respond(order.order_id, "payment_failed", 503)
+
     metrics.inc("payments_ok")
-
-    with db.connect(db.SOURCE_DB) as c:
-        c.execute("INSERT INTO orders VALUES (?, ?, ?, ?, ?)", (order.order_id, order.sku, order.qty, order.amount, time.time()))
-        c.execute("UPDATE inventory SET stock = MAX(stock - ?, 0) WHERE sku = ?", (order.qty, order.sku))
-    metrics.inc("orders_saved")
-    log("checkout", "order_saved", order_id=order.order_id)
-
-    worker.enqueue(o)
-    return {"status": "ok", "order_id": order.order_id}
+    orders.save_order(o)
+    return _respond(order.order_id, "ok")
 
 
 @app.get("/health")
@@ -65,7 +78,13 @@ def get_metrics():
     return {**metrics.snapshot(), **worker.stats(), "sync": sync.stats()}
 
 
-# ---- Admin endpoints: the ONLY actions the recovery agent is allowed to take ----
+# ---- Admin endpoints: the ONLY things the recovery agent is allowed to do or see ----
+@app.get("/admin/config")
+def admin_config():
+    """Read-only: the shop's live config next to its last-known-good config."""
+    return settings.view()
+
+
 @app.post("/admin/restart_worker")
 def admin_restart_worker():
     """Start a fresh worker, retire the stuck one, park its unfinished orders."""
@@ -76,3 +95,15 @@ def admin_restart_worker():
 def admin_requeue_stuck():
     """Put parked orders back on the queue."""
     return worker.requeue_parked()
+
+
+@app.post("/admin/rollback_config")
+def admin_rollback_config():
+    """Restore the shop's last-known-good config."""
+    return settings.rollback()
+
+
+@app.post("/admin/replay_lost_orders")
+def admin_replay_lost_orders():
+    """Replay orders that were acknowledged but never saved (never duplicates)."""
+    return orders.replay_lost_orders()

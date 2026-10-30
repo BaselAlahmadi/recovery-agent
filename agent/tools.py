@@ -10,7 +10,7 @@ from pathlib import Path
 import requests
 
 SHOP_URL = os.getenv("SHOP_URL", "http://127.0.0.1:8000")
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+LOG_DIR = Path(os.getenv("SHOP_STATE_DIR", Path(__file__).resolve().parent.parent)) / "logs"
 LOG_COMPONENTS = ["shop", "requests", "checkout", "payment", "queue", "worker", "sync"]
 
 # ACTION ALLOWLIST: the agent cannot call anything else.
@@ -98,7 +98,7 @@ TOOLS = [
     _action("replay_lost_orders", "Re-create orders customers were told 'ok' but that were never saved. Idempotent. Do after the cause is fixed."),
     _action("requeue_unprocessed", "Re-queue saved orders that never got processed (dropped from the queue or dead-lettered). Idempotent."),
     _action("resync_replica", "Run an inventory sync now using current sync settings (repairs corrupted replica rows once the cause is fixed)."),
-    {"name": "no_incident", "description": "All invariants pass and you took no actions.",
+    {"name": "no_incident", "description": "Everything is healthy and you took no actions.",
      "input_schema": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}},
     {"name": "resolve", "description": "Incident fixed by your actions; accepted only if all invariants pass now.",
      "input_schema": {"type": "object", "properties": {**_ROOT_CAUSE_PROPS, "summary": {"type": "string"}},
@@ -108,3 +108,7 @@ TOOLS = [
                                                        "suggested_next_steps": {"type": "string"}},
                       "required": ["reason", "root_cause_categories", "suggested_next_steps"]}},
 ]
+
+
+# Logs-only ablation: no invariant checks and no raw counters, only logs, /health and the config view.
+TOOLS_LOGS_ONLY = [t for t in TOOLS if t["name"] not in ("check_invariants", "get_metrics")]

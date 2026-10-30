@@ -43,10 +43,17 @@ def _cached(tool_list):
     return tool_list[:-1] + [{**tool_list[-1], "cache_control": {"type": "ephemeral"}}]
 
 
+SYSTEM_LOGS_ONLY = """You are the on-call engineer for a small e-commerce shop (checkout+payments, order queue+worker, inventory sync).
+Failures are SILENT: no crashes, no error logs, /health stays ok. You only have the logs, /health and the shop's config view to judge the shop's state.
+You get recent log lines first. If nothing looks wrong and you took no actions, call no_incident. Otherwise find the root cause, take the smallest safe action with a reason and confidence. Fix the CAUSE first (rollback_config, restart_worker), then repair the DAMAGE it did (replay_lost_orders, requeue_unprocessed, resync_replica, requeue_stuck). Several faults can be active at once. When you believe everything is fixed call resolve listing every root-cause category you fixed.
+Escalate instead of retrying if the cause is outside the shop's control or no allowed action helps. Never repeat an action that did not help; never guess. Be brief."""
+
+
 class Agent:
-    def __init__(self, verify=True):
+    def __init__(self, verify=True, use_invariants=True):
         self.client = anthropic.Anthropic()
-        self.verify = verify          # switch for the "no verify step" ablation later
+        self.verify = verify                  # False = the "no verify step" ablation
+        self.use_invariants = use_invariants  # False = the "logs only" ablation
         self.rec = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "model": MODEL, "symptoms": None,
                     "evidence": [], "actions": [], "verification": None, "outcome": None,
                     "root_cause_categories": [], "root_cause_detail": None, "next_steps": None,
@@ -60,6 +67,12 @@ class Agent:
 
     def _situation_report(self):
         """Like a pager alert with context: collected by code so the LLM needs fewer turns."""
+        if not self.use_invariants:           # logs-only ablation: recent log lines, nothing else
+            parts = [f"[{c}]\n{tools.read_logs(c, n)}" for c, n in
+                     (("shop", 5), ("requests", 4), ("queue", 3), ("worker", 3), ("sync", 2))]
+            self._evidence("read_logs", {"components": "shop,requests,queue,worker,sync"}, "\n".join(parts))
+            self.rec["symptoms"] = "(logs-only mode: no invariant checks)"
+            return "Recent logs (collected automatically):\n" + "\n".join(parts)
         checks = invariants.summarize(self._check())
         self.rec["symptoms"] = checks
         metrics = tools.metrics_text(tools.fetch_metrics())
@@ -80,7 +93,7 @@ class Agent:
         result = tools.call_action(name)
         entry = {"action": name, "reason": clean(args.get("reason")), "confidence": args.get("confidence"), "result": result}
         self.rec["actions"].append(entry)
-        if not self.verify:
+        if not (self.verify and self.use_invariants):   # ablations: no re-check after acting
             return f"action result: {result}"
         time.sleep(VERIFY_WAIT_S)
         checks = self._check()
@@ -98,20 +111,22 @@ class Agent:
                             root_cause_detail=clean(args.get("root_cause_detail")),
                             next_steps=next_steps, summary=clean(args.get("reason"), 600))
             return "ok", True
-        checks = self._check()
-        if not invariants.all_ok(checks):
+        gate = self.verify and self.use_invariants      # ablations remove the "invariants must pass" gate
+        checks = self._check() if gate else None
+        if gate and not invariants.all_ok(checks):
             return "REFUSED: invariants still failing:\n" + invariants.summarize(checks), False
+        verification = invariants.summarize(checks) if gate else "(not verified)"
         if name == "no_incident":
             if self.rec["actions"]:
                 return "REFUSED: you took actions, so call resolve instead.", False
-            self.rec.update(outcome="NO_INCIDENT", summary=clean(args.get("summary")), verification=invariants.summarize(checks))
+            self.rec.update(outcome="NO_INCIDENT", summary=clean(args.get("summary")), verification=verification)
             return "ok", True
         # resolve
         if not self.rec["actions"]:
             return "REFUSED: you took no actions. If nothing is wrong, call no_incident.", False
         self.rec.update(outcome="RESOLVED", root_cause_categories=categories(args.get("root_cause_categories")),
                         root_cause_detail=clean(args.get("root_cause_detail")), summary=clean(args.get("summary")),
-                        verification=invariants.summarize(checks))
+                        verification=verification)
         return "ok", True
 
     def _dispatch(self, name, args):
@@ -137,9 +152,11 @@ class Agent:
 
     # ---- main loop ----
     def run(self):
+        t0 = time.time()
         messages = [{"role": "user", "content": self._situation_report()}]
-        system = [{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}]
-        tool_defs = _cached(tools.TOOLS)
+        system = [{"type": "text", "text": SYSTEM if self.use_invariants else SYSTEM_LOGS_ONLY,
+                   "cache_control": {"type": "ephemeral"}}]
+        tool_defs = _cached(tools.TOOLS if self.use_invariants else tools.TOOLS_LOGS_ONLY)
         for _ in range(MAX_TURNS):
             resp = self.client.messages.create(model=MODEL, max_tokens=600, system=system,
                                                tools=tool_defs, messages=messages)
@@ -166,5 +183,6 @@ class Agent:
         if self.rec["outcome"] is None:       # budget ran out: never loop forever, hand over to a human
             self.rec.update(outcome="ESCALATED", root_cause_categories=["unknown"],
                             summary="Automatic escalation: turn budget exhausted without resolution.")
-        self.rec["final_checks"] = invariants.summarize(self._check())
+        self.rec["final_checks"] = invariants.summarize(self._check())   # for the report only
+        self.rec["agent_seconds"] = round(time.time() - t0, 1)
         return self.rec

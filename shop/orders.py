@@ -100,6 +100,7 @@ def replay_lost_orders():
     if not _replay_lock.acquire(blocking=False):
         return {"error": "a replay is already running"}
     try:
+        time.sleep(1.0)     # let requests that are mid-flight (max ~0.6s) get their answer logged first
         reqs, resps = _read_request_log()
         with db.connect(db.SOURCE_DB) as c:
             saved = {row[0] for row in c.execute("SELECT order_id FROM orders")}

@@ -1,8 +1,9 @@
 """Write the markdown incident report for one agent run."""
+import os
 import time
 from pathlib import Path
 
-REPORT_DIR = Path(__file__).resolve().parent.parent / "reports"
+REPORT_DIR = Path(os.getenv("AGENT_REPORT_DIR", Path(__file__).resolve().parent.parent / "reports"))
 
 
 def write(rec):

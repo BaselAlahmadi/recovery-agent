@@ -1,4 +1,6 @@
 """The shop's web API. Run with: python -m uvicorn shop.app:app --port 8000"""
+import os
+import random
 import time
 
 from fastapi import FastAPI
@@ -21,7 +23,9 @@ class Order(BaseModel):
 
 @app.on_event("startup")
 def startup():
-    logger.reset()       # fresh logs + fresh DB + fresh config every start (replay relies on this match)
+    if os.getenv("SHOP_SEED"):                  # reproducible randomness for the eval
+        random.seed(int(os.environ["SHOP_SEED"]))
+    logger.reset()      # fresh logs + fresh DB + fresh config every start (replay relies on this match)
     db.init_db()
     settings.init()
     worker.start()

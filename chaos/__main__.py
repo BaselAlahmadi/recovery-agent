@@ -46,6 +46,7 @@ def read():
 
 def write(data):
     # write to a temp file then swap, so the shop never reads a half-written file
+    RUNTIME_CONFIG.parent.mkdir(parents=True, exist_ok=True)
     tmp = RUNTIME_CONFIG.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, indent=2))
     os.replace(tmp, RUNTIME_CONFIG)

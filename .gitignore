@@ -5,3 +5,4 @@ data/
 logs/*.jsonl
 reports/*.md
 chaos/runtime_config.json
+eval/runs/

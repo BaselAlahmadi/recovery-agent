@@ -4,12 +4,16 @@ The shop re-reads chaos/runtime_config.json every time it needs a setting.
 chaos/ will write that file later to switch faults on and off; the shop only reads it.
 """
 import json
+import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-LOG_DIR = ROOT / "logs"
-DATA_DIR = ROOT / "data"
-RUNTIME_CONFIG = ROOT / "chaos" / "runtime_config.json"
+# All state (logs, databases, fault switches) lives under STATE_DIR. By default that is the repo
+# folder; the eval sets SHOP_STATE_DIR so many shops can run side by side without sharing anything.
+STATE_DIR = Path(os.getenv("SHOP_STATE_DIR", ROOT))
+LOG_DIR = STATE_DIR / "logs"
+DATA_DIR = STATE_DIR / "data"
+RUNTIME_CONFIG = STATE_DIR / "chaos" / "runtime_config.json"
 
 # Healthy defaults. A key in the runtime config file overrides the default.
 DEFAULTS = {
